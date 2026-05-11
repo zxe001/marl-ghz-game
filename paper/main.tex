@@ -1,0 +1,409 @@
+% IEEE Conference Paper Template for GHZ MARL paper
+% Upload this to Overleaf as main.tex
+\documentclass[conference]{IEEEtran}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{float}
+
+% Point to the figures directory (adjust path for your Overleaf project)
+\graphicspath{{./figures/}}
+
+% Overleaf comment: If your figures use subfigures, also add:
+% \usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+
+\definecolor{darkblue}{RGB}{0,51,102}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=darkblue,
+    citecolor=darkblue,
+    urlcolor=darkblue,
+}
+
+\begin{document}
+
+\title{Learning the GHZ Game with Multi-Agent Reinforcement Learning: \\ Convergence to the Classical Bound and the Quantum Advantage}
+
+\author{\IEEEauthorblockN{Author Name\textsuperscript{1}}
+\IEEEauthorblockA{\textsuperscript{1}Institution / University, Department\\
+Email: author@example.com}
+}
+
+\maketitle
+
+\begin{abstract}
+The Greenberger--Horne--Zeilinger (GHZ) game is a canonical thought experiment in quantum information theory: three isolated players must coordinate their binary responses without communication, and while any classical strategy is provably limited to a 75\% win rate, a quantum strategy using a shared GHZ state achieves 100\%. In this work, we investigate whether multi-agent deep reinforcement learning (MADRL) can autonomously discover an optimal classical strategy for the GHZ game from scratch. We formulate the game as a cooperative multi-agent Markov game and train three agents using Multi-Agent Proximal Policy Optimization (MAPPO) with a shared policy network conditioned on agent identity. Across five independent random seeds, the agents converge to the 75\% classical bound in the majority of runs (3/5), while the remaining seeds become trapped in a suboptimal random-play equilibrium, revealing a novel failure mode for gradient-based MARL. Through ablation studies, we identify network capacity---specifically the agent-ID embedding dimension---as the critical factor for successful convergence, while entropy decay and a centralized critic prove helpful but non-essential. We further compute the full Born-rule probability distribution for the quantum GHZ-state strategy, confirming a 100\% win rate and visualising the interference-driven cancellation of losing outcomes. Our results demonstrate that MADRL can rediscover the fundamental limits of classical correlation without prior knowledge, while also highlighting the pitfalls of local optima in multi-agent policy space, and they provide a pedagogical bridge between reinforcement learning and quantum information science.
+\end{abstract}
+
+\begin{IEEEkeywords}
+multi-agent reinforcement learning, MAPPO, GHZ game, quantum advantage, entanglement, Born rule
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+The GHZ game, named after Greenberger, Horne, and Zeilinger~\cite{ghz1989}, is one of the most striking demonstrations of the power of quantum entanglement over classical correlation. In this game, three spatially separated players---Alice, Bob, and Carol---are each given a single letter (X or Y) by a referee, with the constraint that the total number of X's across all three players is always odd. Each player must respond with either $+$ or $-$, without any form of communication. The team wins if the parity of $+$ responses satisfies: an odd number of $+$ when all three receive X (the XXX scenario), and an even number of $+$ when exactly one player receives X (the XYY, YXY, and YYX scenarios).
+
+This seemingly simple game has a profound property: any classical strategy, no matter how cleverly constructed, can win at most 3 out of the 4 equally probable scenarios, yielding a hard upper bound of 75\%~\cite{mermin1990}. The proof is elementary---the four win-condition equations multiply to give the contradiction $1 = -1$---yet the implication is deep. However, if the three players share a GHZ entangled state $|\text{GHZ}\rangle = (|000\rangle + |111\rangle)/\sqrt{2}$ before the game, they can exploit quantum interference to win with probability 100\%~\cite{mermin1990extreme,brassard1999}.
+
+While the game-theoretic analysis of the GHZ game is well established, an interesting question arises from the perspective of artificial intelligence: \emph{Can autonomous agents, trained purely through trial and error, discover the optimal classical strategy without any prior knowledge of the game's structure or its theoretical limits?} This question sits at the intersection of multi-agent reinforcement learning (MARL) and quantum foundations, and it serves as a pedagogical testbed for both fields.
+
+In this paper, we apply Multi-Agent Proximal Policy Optimization (MAPPO)~\cite{yu2022mappo} to train three cooperative agents to play the GHZ game. Our contributions are threefold:
+
+\begin{enumerate}
+    \item We formulate the GHZ game as a cooperative multi-agent Markov game and demonstrate that MAPPO agents converge to the optimal classical win rate of 75\% in the majority of random seeds, while also identifying a systematic failure mode where agents become trapped in a suboptimal random-play equilibrium.
+    \item Through detailed analysis of training dynamics---including per-scenario win rates, policy probability evolution, and exploration entropy decay---we characterize \emph{how} the agents learn the optimal strategy and \emph{why} some initialisations fail.
+    \item We conduct ablation studies revealing that \emph{network capacity} (specifically the agent-ID embedding dimension) is the critical factor for convergence, while entropy decay and a centralized critic are helpful but not essential. We complement these RL results with an explicit quantum-mechanical calculation of the GHZ-state strategy to quantify the +25 pp quantum advantage.
+\end{enumerate}
+
+The remainder of this paper is organised as follows. Section~II formalises the GHZ game and the MARL problem. Section~III describes our MAPPO architecture and training methodology. Section~IV presents experimental results, including training dynamics, policy evolution, ablation studies, and the quantum advantage comparison. Section~V discusses implications and limitations, and Section~VI concludes.
+
+\section{Background and Problem Formulation}
+
+\subsection{The GHZ Game}
+
+The GHZ game involves three players indexed by $i \in \{0, 1, 2\}$ (Alice, Bob, and Carol, respectively) and a referee. The game proceeds as follows:
+
+\begin{enumerate}
+    \item The referee uniformly randomly selects one of four scenarios: $\mathcal{S} = \{\text{XXX}, \text{XYY}, \text{YXY}, \text{YYX}\}$. Each scenario has probability $\frac{1}{4}$.
+    \item Player $i$ privately observes their assigned letter $o_i \in \{X, Y\}$, corresponding to the $i$-th character of the scenario string.
+    \item Without communication, each player outputs an action $a_i \in \{+, -\}$.
+    \item The team wins if and only if the parity condition is satisfied:
+    \begin{equation}
+        \text{Win} = \begin{cases}
+            n_+ \equiv 1 \pmod{2}, & \text{if scenario} = \text{XXX} \\
+            n_+ \equiv 0 \pmod{2}, & \text{otherwise}
+        \end{cases}
+    \end{equation}
+    where $n_+ = |\{i : a_i = +\}|$ is the total number of $+$ responses.
+\end{enumerate}
+
+The classical bound of 75\% arises from a simple parity argument~\cite{mermin1990}. Let $f_i(o)$ be player $i$'s deterministic response ($+1$ for $+$, $-1$ for $-$) upon observing $o \in \{X, Y\}$. The four win conditions translate to:
+\begin{align}
+    f_0(X) \cdot f_1(X) \cdot f_2(X) &= -1 \quad (\text{odd } +)\label{eq:xxx}\\
+    f_0(X) \cdot f_1(Y) \cdot f_2(Y) &= +1 \quad (\text{even } +)\label{eq:xyy}\\
+    f_0(Y) \cdot f_1(X) \cdot f_2(Y) &= +1 \quad (\text{even } +)\label{eq:yxy}\\
+    f_0(Y) \cdot f_1(Y) \cdot f_2(X) &= +1 \quad (\text{even } +)\label{eq:yyx}
+\end{align}
+Multiplying Eqs.~(\ref{eq:xxx})--(\ref{eq:yyx}), each $f_i(o)$ appears exactly twice, so the left-hand side equals $+1$. The right-hand side is $(-1) \cdot (+1)^3 = -1$, yielding the contradiction $+1 = -1$. Hence, no deterministic strategy can satisfy all four equations; at most three can be satisfied, giving a maximum win rate of $3/4 = 75\%$. This bound also holds for stochastic (mixed) strategies by convexity.
+
+\subsection{Quantum Strategy with GHZ State}
+
+If the players share the three-qubit GHZ state
+\begin{equation}
+    |\text{GHZ}\rangle = \frac{1}{\sqrt{2}}\bigl(|000\rangle + |111\rangle\bigr)
+\end{equation}
+before the game, they can exceed the classical bound. The quantum protocol is as follows~\cite{brassard1999}:
+
+\begin{itemize}
+    \item If player $i$ receives $X$, they measure their qubit in the Pauli-$X$ basis $\{|+\rangle, |-\rangle\}$.
+    \item If player $i$ receives $Y$, they measure their qubit in the Pauli-$Y$ basis $\{|+i\rangle, |-i\rangle\}$.
+    \item The measurement outcome ($+$ or $-$) becomes their answer.
+\end{itemize}
+
+The Born-rule probability of an outcome tuple $(a, b, c)$ is:
+\begin{equation}
+    P(a,b,c) = |\langle \psi_a | \otimes \langle \psi_b | \otimes \langle \psi_c | \; |\text{GHZ}\rangle |^2
+\end{equation}
+where $|\psi_{a}\rangle$ is the eigenstate corresponding to outcome $a$ in the appropriate measurement basis. As we verify in Section~IV-D, quantum interference exactly cancels the four losing outcomes in each scenario, leaving only winning outcomes with equal probability $1/4$, yielding a 100\% win rate.
+
+\subsection{GHZ Game as a Multi-Agent Markov Game}
+
+We formulate the GHZ game as a cooperative multi-agent Markov game (also known as a multi-agent MDP with shared rewards). The game is \emph{episodic} with a single time step per episode:
+
+\begin{itemize}
+    \item \textbf{State space:} $\mathcal{O} = \{X, Y\}^3$, the joint observation (which scenario was selected).
+    \item \textbf{Observation space per agent:} $o_i \in \{X, Y\}$, represented as a one-dimensional real value (0.0 for X, 1.0 for Y).
+    \item \textbf{Action space per agent:} $\mathcal{A}_i = \{+, -\}$, represented as $\{0, 1\}$.
+    \item \textbf{Reward:} All three agents receive $R = +1$ for a win and $R = -1$ for a loss (shared cooperative reward).
+    \item \textbf{Objective:} Maximise the expected win rate $\mathbb{E}[\mathbf{1}_{\text{win}}]$ over the uniform distribution of scenarios.
+\end{itemize}
+
+Since each episode is a single step, there is no sequential dependency, making this essentially a multi-agent contextual bandit problem. However, the cooperative nature and the lack of communication between agents make credit assignment non-trivial: each agent must learn its role purely from the shared reward signal.
+
+\section{Method}
+
+\subsection{MAPPO Architecture}
+
+We adopt the Multi-Agent Proximal Policy Optimization (MAPPO) framework~\cite{yu2022mappo}, which extends single-agent PPO~\cite{schulman2017ppo} to the multi-agent setting using Centralised Training with Decentralised Execution (CTDE). Our architecture consists of:
+
+\subsubsection{Shared Actor with Agent-ID Embedding}
+
+All three agents share a single policy network (actor) $\pi_\theta(a_i | o_i, \text{id}_i)$, where the agent's identity is injected via a learnable embedding. Specifically, each agent $i \in \{0, 1, 2\}$ is assigned a 4-dimensional learned embedding vector $\mathbf{e}_i \in \mathbb{R}^4$. The actor network is a multi-layer perceptron (MLP):
+\begin{equation}
+    \mathbf{h} = \text{ReLU}\bigl(\mathbf{W}_1 [o_i \parallel \mathbf{e}_i] + \mathbf{b}_1\bigr)
+\end{equation}
+\begin{equation}
+    \boldsymbol{\pi}_i = \text{softmax}\bigl(\mathbf{W}_2 \, \text{ReLU}(\mathbf{W}_3 \mathbf{h} + \mathbf{b}_3) + \mathbf{b}_2\bigr)
+\end{equation}
+where $\parallel$ denotes concatenation. The hidden layer has 32 units with ReLU activation. This parameter-sharing scheme with agent-ID conditioning is more sample-efficient than training three independent policies, as agents can share learned representations while maintaining role differentiation through the ID embedding.
+
+\subsubsection{Centralized Critic}
+
+The critic (value function) $V_\phi(\mathbf{o})$ takes the concatenated observations of all three agents as input:
+\begin{equation}
+    V_\phi(\mathbf{o}) = \text{MLP}\bigl([o_0, o_1, o_2]\bigr) \in \mathbb{R}
+\end{equation}
+with two hidden layers of 64 units each and ReLU activation. During training, the centralized critic observes the full joint observation, reducing the credit-assignment variance that arises from the shared reward. At execution time, only the decentralized actor is used.
+
+\subsection{Training Procedure}
+
+We train using the standard PPO clipped surrogate objective. For each collected trajectory (a single step of the game), the advantage is computed using the centralized critic:
+\begin{equation}
+    \hat{A}_t = R_t - V_\phi(\mathbf{o}_t)
+\end{equation}
+and normalized to zero mean and unit variance across the batch.
+
+The actor is updated by minimising:
+\begin{equation}
+    \mathcal{L}^{\text{actor}}(\theta) = -\mathbb{E}_t\Bigl[\min\bigl(r_t(\theta)\hat{A}_t,\; \text{clip}(r_t(\theta), 1-\epsilon, 1+\epsilon)\hat{A}_t\bigr) - \beta \, H(\pi_\theta(\cdot|o_t))\Bigr]
+\end{equation}
+where $r_t(\theta) = \pi_\theta(a_t|o_t) / \pi_{\theta_{\text{old}}}(a_t|o_t)$ is the importance-sampling ratio, $\epsilon = 0.2$ is the clipping parameter, and $H(\cdot)$ is the policy entropy bonus with coefficient $\beta$.
+
+The critic is updated by minimising the mean squared error:
+\begin{equation}
+    \mathcal{L}^{\text{critic}}(\phi) = \mathbb{E}_t\bigl[(V_\phi(\mathbf{o}_t) - R_t)^2\bigr]
+\end{equation}
+
+We employ several techniques to ensure stable convergence:
+\begin{itemize}
+    \item \textbf{Entropy decay:} The entropy coefficient $\beta$ starts at 0.05 and decays by a factor of 0.95 after each PPO update (not after each episode), ensuring exploration is reduced only when learning actually occurs. The coefficient is lower-bounded at 0.001.
+    \item \textbf{Learning rate decay:} The learning rate decays by a factor of 0.98 per PPO update, starting from $10^{-3}$.
+    \item \textbf{Gradient clipping:} Gradients are clipped to a maximum norm of 0.5.
+    \item \textbf{PPO epochs:} Each batch of collected episodes undergoes 8 PPO update epochs with mini-batches of size 256.
+\end{itemize}
+
+Table~\ref{tab:hyperparams} summarises the key hyperparameters.
+
+\begin{table}[htbp]
+\centering
+\caption{Hyperparameters for MAPPO training.\label{tab:hyperparams}}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Value} \\
+\midrule
+Number of agents            & 3 \\
+Observation dimension       & 1 \\
+Action dimension            & 2 \\
+Actor hidden dimension      & 32 \\
+Critic hidden dimension     & 64 \\
+Agent-ID embedding dimension & 4 \\
+Learning rate (actor/critic)& $10^{-3}$ \\
+LR decay factor (per update)& 0.98 \\
+PPO clipping $\epsilon$     & 0.2 \\
+Entropy coefficient $\beta$ & 0.05 $\to$ 0.001 \\
+Entropy decay factor        & 0.95 \\
+PPO epochs                  & 8 \\
+Mini-batch size             & 256 \\
+Max gradient norm           & 0.5 \\
+Training episodes           & 15,000 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Experiments and Results}
+
+We conduct four sets of experiments: (1) multi-seed training to assess convergence stability, (2) analysis of training dynamics and policy evolution, (3) ablation studies to identify critical components, and (4) quantum simulation to quantify the advantage. All experiments use the hyperparameters listed in Table~\ref{tab:hyperparams} unless otherwise noted.
+
+\subsection{Convergence to the Classical Bound}
+
+We train the MAPPO agents for 15,000 episodes across five independent random seeds (42, 123, 456, 789, 1024). Fig.~\ref{fig:training} shows the training dynamics.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{fig2_training_dynamics.pdf}
+    \caption{Training dynamics of MAPPO agents on the GHZ game. (a) Smoothed training win rate across five random seeds, converging to the classical bound of 0.75. (b) Per-scenario evaluation win rate for seed 42, showing that the agents learn to win XYY, YXY, and YYX (100\%) while sacrificing XXX (0\%). (c) Average reward evolution. (d) Entropy coefficient decay and policy entropy during training.}
+    \label{fig:training}
+\end{figure}
+
+Across the five seeds, 3 out of 5 consistently converge to the classical bound, achieving best evaluation win rates of 0.767, 0.765, and 0.774 (seeds 42, 123, and 1024, respectively), with a mean best win rate of $0.769 \pm 0.004$. The remaining two seeds (456 and 789) become trapped in a suboptimal stochastic policy with a win rate of approximately 0.50, never surpassing the random baseline. We analyse this failure mode in Section~IV-E. Fig.~\ref{fig:multiseed} shows the mean and standard deviation across all five seeds, with the wide confidence band reflecting the two failed seeds.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{fig7_multi_seed_summary.pdf}
+    \caption{Mean win rate with $\pm 1$ standard deviation across five random seeds. The wide confidence band reflects the divergence between converged and failed seeds.}
+    \label{fig:multiseed}
+\end{figure}
+
+\subsection{Learned Strategy and Policy Evolution}
+
+After training (in converged seeds), the agents learn a simple deterministic strategy: \emph{every agent always responds with $-$ regardless of the observed letter}. Under this strategy, $P(+|X)$ and $P(+|Y)$ are below 0.002 for all three agents, and the win rate is precisely 75\% (winning on XYY, YXY, YYX at 100\% each, and losing on XXX at 0\%). This is one of several equivalent optimal classical strategies; any strategy where all agents always output the same sign would also achieve 75\%.
+
+Fig.~\ref{fig:policy} traces the evolution of the policy probabilities during training for seed 42. At the first evaluation (episode 500), all three agents output $+$ with probability $p \approx 0.5$--$0.6$ regardless of observation, consistent with random exploration. By episode 5,000, $P(+|\cdot)$ has fallen below 0.3 for all agents. By episode 10,000, the probabilities are below 0.05, and at the final evaluation (episode 15,000), they are below 0.002, indicating an essentially deterministic strategy.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{fig3_policy_evolution.pdf}
+    \caption{Evolution of policy probabilities $P(+|X)$ (top row) and $P(+|Y)$ (bottom row) for each agent during training (seed 42). All agents converge toward deterministically outputting $-$ ($P(+) \to 0$).}
+    \label{fig:policy}
+\end{figure}
+
+It is noteworthy that the agents learn to coordinate on the same output ($-$) even though the problem is symmetric and there are multiple equivalent optimal strategies (e.g., ``Alice always $+$, Bob always $+$, Carol always $+$'' would also achieve 75\%). The shared actor network with agent-ID embeddings naturally breaks symmetry during training, but the specific symmetry-breaking outcome (which sign the agents collectively choose) is determined by random initialisation and training stochasticity.
+
+\subsection{Ablation Studies}
+
+To understand which components of our approach are critical for successful learning, we conduct ablation experiments comparing the baseline MAPPO configuration against three variants:
+
+\begin{enumerate}
+    \item \textbf{No entropy decay:} The entropy coefficient is fixed at $\beta = 0.05$ throughout training, rather than decaying to 0.001.
+    \item \textbf{IPPO (Independent PPO):} Each agent has an independent critic that observes only its own observation, removing the centralized critic. This is equivalent to standard single-agent PPO applied independently to each agent.
+    \item \textbf{Small network:} The network capacity is reduced: actor hidden dimension from 32 to 16, critic hidden dimension from 64 to 32, and agent-ID embedding dimension from 4 to 2.
+\end{enumerate}
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{fig6_ablations.pdf}
+    \caption{Ablation study results. (a) Training win rate curves for each variant. (b) Best evaluation win rate achieved by each variant. Baseline, no-entropy-decay, and IPPO converge to the classical bound, while the small-network variant fails to learn, remaining at the random baseline of 0.50.}
+    \label{fig:ablations}
+\end{figure}
+
+Fig.~\ref{fig:ablations} presents the ablation results, with the best evaluation win rate for each variant summarised in Table~\ref{tab:ablation_summary}.
+
+\begin{table}[htbp]
+\centering
+\caption{Ablation results: best evaluation win rate (seed 42).\label{tab:ablation_summary}}
+\begin{tabular}{@{}lcc@{}}
+\toprule
+\textbf{Variant} & \textbf{Best WR} & \textbf{Converged?} \\
+\midrule
+Baseline (MAPPO)       & 0.767 & \checkmark \\
+No entropy decay       & 0.766 & \checkmark \\
+IPPO (indep.\ critics) & 0.762 & \checkmark \\
+Small network          & 0.531 & \texttimes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Key findings:
+
+\begin{itemize}
+    \item \textbf{Entropy decay} is not strictly necessary for this problem. The no-entropy-decay variant achieves a best win rate of 0.766, essentially identical to the baseline (0.767). Both variants converge to the same deterministic ``all $-$'' strategy. This is because the gradient signal from the shared reward is sufficient to push the policy toward determinism even without explicit entropy pressure, for the specific initialisation of seed 42.
+
+    \item \textbf{Centralized critic (MAPPO vs.\ IPPO):} The IPPO variant achieves a best win rate of 0.762, comparable to MAPPO (0.767). Despite having three independent critics that each observe only a single agent's observation, IPPO eventually discovers the optimal strategy. This confirms that the GHZ game is simple enough that even standard single-agent PPO applied independently to each agent can succeed, at least for favourable initialisations.
+
+    \item \textbf{Network capacity is critical:} The small-network variant (hidden dimensions reduced by 50\%, embedding dimension halved from 4 to 2) fails to converge, achieving a best evaluation win rate of only 0.531---barely above the random baseline of 0.50. Inspection reveals that the policy remains stochastic with $P(+) \approx 0.46$ for all agents. The reduced embedding dimension (2) may be insufficient to cleanly differentiate the three agent identities, preventing the policy from learning coordinated behaviour.
+\end{itemize}
+
+These results reveal a nuanced picture: the GHZ game is simple enough that several architectural choices (centralized vs.\ independent critics, entropy decay schedule) do not substantially affect the outcome for well-initialised runs. However, the \emph{representational capacity} of the network---particularly the agent-ID embedding---is critical, and even with adequate capacity, not all random initialisations lead to the optimal strategy.
+
+\subsection{Quantum Advantage: GHZ-State Simulation}
+
+To quantify the gap between classical and quantum strategies, we implement the full Born-rule probability calculation for the GHZ-state quantum protocol described in Section~II-B.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{fig4_quantum_vs_classical.pdf}
+    \caption{Win rate comparison across strategy classes. The classical and MARL strategies achieve the theoretical bound of 75\%, while the quantum GHZ-state strategy achieves a perfect 100\% win rate through interference.}
+    \label{fig:quantum_bar}
+\end{figure}
+
+Fig.~\ref{fig:quantum_bar} compares the win rates of the three strategy classes. The quantum advantage is exactly $+25$ percentage points over the classical bound.
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\columnwidth]{fig5_quantum_interference.pdf}
+    \caption{Born-rule probability distributions for the XXX scenario (left) and the XYY/YXY/YYX scenarios (right). In each case, quantum interference exactly cancels the four losing outcome combinations (red), leaving only the four winning outcomes (green) with equal probability 0.25.}
+    \label{fig:interference}
+\end{figure}
+
+Fig.~\ref{fig:interference} illustrates the mechanism underlying the quantum advantage. For the XXX scenario, the four outcome combinations with an even number of $+$ (which would lose the game) have exactly zero Born probability due to destructive quantum interference between the $|000\rangle$ and $|111\rangle$ branches of the GHZ state. Conversely, for the XYY, YXY, and YYX scenarios, the four outcomes with an odd number of $+$ are cancelled. This ``perfect cancellation'' is a direct consequence of the GHZ state's entanglement structure and the choice of measurement bases.
+
+Specifically, the amplitude for an outcome $(a,b,c)$ in scenario XXX is:
+\begin{equation}
+    \langle abc|\text{GHZ}\rangle = \frac{1}{\sqrt{2}}\bigl(\langle a|0\rangle\langle b|0\rangle\langle c|0\rangle + \langle a|1\rangle\langle b|1\rangle\langle c|1\rangle\bigr)
+\end{equation}
+For outcomes with an even number of $+$, the two terms have equal magnitude but opposite phase when at least one measurement is in the $Y$ basis, causing exact cancellation. This elegant mathematical structure is what enables the quantum strategy to transcend the classical bound.
+
+\subsection{Failure Mode: The Random-Policy Local Optimum}
+
+An important empirical finding is that 2 out of 5 seeds (456 and 789) and the small-network ablation all fail to converge to the optimal strategy, remaining stuck at a win rate of approximately 0.50. Inspection of the policy probabilities reveals why: in these failed runs, all three agents maintain $P(+) \approx 0.5$ for both observations, equivalent to uniform random action selection.
+
+This failure mode can be understood analytically. When all agents play the uniform random strategy ($P(+)=0.5$ regardless of observation), the expected reward is zero---half the scenarios are won, half are lost. For any single agent considering a deviation, the marginal benefit is also zero: if agents 0 and 1 are random, agent 2's action does not affect the expected outcome (since the parity of an odd number of random bits is itself uniform). The gradient of the policy objective therefore vanishes, creating a \emph{suboptimal stationary point} in the policy landscape.
+
+Notably, entropy decay is not the culprit---both failed seeds and the small-network variant use the same entropy decay schedule as the successful seeds. Rather, the culprit appears to be the random initialisation of the network weights, which in some cases places the policy in the basin of attraction of the random-play stationary point rather than the globally optimal deterministic strategy. The small-network variant is especially vulnerable because the 2-dimensional agent-ID embedding provides too little representational capacity to break the symmetry between the three agents during the critical early phase of training.
+
+This finding underscores an important lesson for MARL practitioners: even on seemingly trivial problems, local optima in the joint policy space can trap gradient-based methods, and careful attention must be paid to both network capacity and random initialisation.
+
+\section{Discussion}
+
+\subsection{Why Does MARL Succeed---and Sometimes Fail?}
+
+The GHZ game reveals an interesting dichotomy for MARL. On the one hand, it is simple enough that with adequate network capacity and favourable random initialisation, agents reliably discover the optimal strategy, achieving the theoretical classical bound without any prior knowledge. On the other hand, a non-trivial fraction of runs (2/5 seeds, and the small-network variant) become trapped in a suboptimal random-play equilibrium, never exceeding the 50\% baseline.
+
+The key factors that distinguish successful from failed runs are:
+
+\begin{enumerate}
+    \item \textbf{Network capacity (critical):} The agent-ID embedding dimension is the single most important factor. Reducing it from 4 to 2 causes complete failure, likely because 2 dimensions are insufficient to cleanly separate three agent identities in the embedding space.
+    \item \textbf{Random initialisation (moderately important):} Some initialisations place the policy in the basin of attraction of the random-play stationary point, from which gradient-based learning cannot escape.
+    \item \textbf{Centralized critic (helpful but not critical):} IPPO with independent critics succeeds for the tested seed, achieving a best WR of 0.762 compared to MAPPO's 0.767.
+    \item \textbf{Entropy decay (helpful but not critical):} The no-entropy-decay variant succeeds for the tested seed, suggesting that the gradient signal from the shared reward alone is sufficient to drive the policy toward determinism for favourable initialisations.
+\end{enumerate}
+
+\subsection{The Quantum-Classical Boundary from an RL Perspective}
+
+An intriguing perspective emerges when viewing the GHZ game through the lens of reinforcement learning. The classical bound of 75\% can be interpreted as the maximum achievable return in a \emph{local hidden-variable} MDP---one where each agent's policy depends only on its local observation. The quantum strategy, by exploiting entanglement, effectively ``cheats'' by introducing non-local correlations that are inaccessible to any classical policy class.
+
+From an RL perspective, one could ask: if we allowed the agents to communicate (i.e., expanded the observation space to include a shared message channel), could they achieve 100\%? The answer is no---communication alone does not help, because the game's constraints are algebraic, not informational. The quantum advantage stems from the non-classical correlations of entanglement, not from information transfer.
+
+This suggests an interesting direction for future work: training RL agents in environments where the state space is augmented with quantum resources (e.g., agents can request measurements on entangled qubits), to study whether RL can \emph{discover} quantum advantages in more complex scenarios.
+
+\subsection{Limitations}
+
+Our study has several limitations. First, the GHZ game has only 4 scenarios and 2 actions per agent, making it a relatively simple problem. While this simplicity makes it an excellent pedagogical testbed, the results may not generalise to more complex quantum games or real-world multi-agent coordination problems. Second, we used MAPPO, which is a standard but not cutting-edge MARL algorithm; more advanced methods such as QMIX~\cite{rashid2018qmix} or Multi-Agent Transformer~\cite{wen2022mat} could potentially discover more sophisticated strategies in harder variants of the game, and may avoid the local-optimum failure mode we observed. Third, our ablation studies are limited to a single random seed per variant (except for the baseline); a more extensive multi-seed ablation analysis would provide stronger statistical evidence for the relative importance of each component. Fourth, we did not systematically investigate the impact of random initialisation on convergence, which our results suggest is an important factor deserving dedicated study.
+
+\section{Conclusion}
+
+In this paper, we demonstrated that Multi-Agent PPO agents can autonomously learn the optimal classical strategy for the GHZ game, achieving the theoretical upper bound of 75\% win rate in the majority (3/5) of random seeds. Through detailed analysis of training dynamics, we showed that successful runs converge to a simple symmetric deterministic strategy (all agents output $-$) via a gradual process of exploration reduction and policy sharpening. However, we also identified a significant failure mode: the uniform random policy ($P(+)=0.5$) constitutes a suboptimal stationary point in the joint policy space, and gradient-based methods can become trapped there depending on random initialisation and network capacity.
+
+Our ablation studies revealed that while entropy decay and a centralized critic are not strictly necessary for success on this simple problem, the \emph{representational capacity} of the network---specifically the agent-ID embedding dimension---is critical. Reducing the embedding dimension from 4 to 2 caused complete failure to learn.
+
+Complementing the RL experiments, we presented the full quantum-mechanical calculation of the GHZ-state strategy, confirming the 100\% win rate and illustrating that quantum interference exactly cancels all losing outcome combinations. The juxtaposition of MARL-learned classical strategies and analytically derived quantum strategies provides an accessible entry point for understanding both the power and the limitations of reinforcement learning in the context of quantum information theory.
+
+Future work could extend this framework in several directions: (i) applying MARL to more complex non-local games such as the Mermin-Peres magic square~\cite{mermin1990simple,peres1990}, (ii) systematically investigating the basin-of-attraction structure of the policy landscape to better understand and mitigate the random-policy local optimum, and (iii) incorporating quantum resources (entangled qubits) into the RL action space to study whether agents can learn to exploit entanglement and surpass the classical bound.
+
+\section*{Acknowledgment}
+
+The authors would like to thank [acknowledgments].
+
+\bibliographystyle{IEEEtran}
+\begin{thebibliography}{00}
+
+\bibitem{ghz1989}
+D.~M.~Greenberger, M.~A.~Horne, and A.~Zeilinger, ``Going beyond Bell's theorem,'' in \emph{Bell's Theorem, Quantum Theory and Conceptions of the Universe}. Springer, 1989, pp.~69--72.
+
+\bibitem{mermin1990}
+N.~D.~Mermin, ``Quantum mysteries revisited,'' \emph{American Journal of Physics}, vol.~58, no.~8, pp.~731--734, 1990.
+
+\bibitem{mermin1990extreme}
+N.~D.~Mermin, ``Extreme quantum entanglement in a superposition of macroscopically distinct states,'' \emph{Physical Review Letters}, vol.~65, no.~15, p.~1838, 1990.
+
+\bibitem{brassard1999}
+G.~Brassard, A.~Broadbent, and A.~Tapp, ``Multi-party pseudo-telepathy,'' in \emph{Proc. 8th International Workshop on Algorithms and Data Structures (WADS)}, 2003, pp.~1--11. (Preprint: quant-ph/0306042, 1999).
+
+\bibitem{yu2022mappo}
+C.~Yu, A.~Velu, E.~Vinitsky, J.~Gao, Y.~Wang, A.~Bayen, and Y.~Wu, ``The surprising effectiveness of PPO in cooperative multi-agent games,'' in \emph{Advances in Neural Information Processing Systems}, vol.~35, 2022, pp.~24\,611--24\,624.
+
+\bibitem{schulman2017ppo}
+J.~Schulman, F.~Wolski, P.~Dhariwal, A.~Radford, and O.~Klimov, ``Proximal policy optimization algorithms,'' \emph{arXiv preprint arXiv:1707.06347}, 2017.
+
+\bibitem{rashid2018qmix}
+T.~Rashid, M.~Samvelyan, C.~Schroeder, G.~Farquhar, J.~Foerster, and S.~Whiteson, ``QMIX: Monotonic value function factorisation for deep multi-agent reinforcement learning,'' in \emph{Proc. ICML}, 2018, pp.~4295--4304.
+
+\bibitem{wen2022mat}
+M.~Wen, J.~Kuba, R.~Lin, W.~Zhang, Y.~Wen, J.~Wang, and Y.~Yang, ``Multi-agent reinforcement learning is a sequence modeling problem,'' in \emph{Advances in Neural Information Processing Systems}, vol.~35, 2022, pp.~16\,509--16\,521.
+
+\bibitem{mermin1990simple}
+N.~D.~Mermin, ``Simple unified form for the major no-hidden-variables theorems,'' \emph{Physical Review Letters}, vol.~65, no.~27, p.~3373, 1990.
+
+\bibitem{peres1990}
+A.~Peres, ``Incompatible results of quantum measurements,'' \emph{Physics Letters A}, vol.~151, no.~3-4, pp.~107--108, 1990.
+
+\end{thebibliography}
+
+\end{document}

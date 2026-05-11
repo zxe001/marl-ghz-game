@@ -2,3 +2,15 @@ __pycache__/
 *.pt
 .DS_Store
 .claude/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+
+# Paper builds (keep source only)
+paper/main.pdf
+IEEE_Transactions_LaTeX2e_templates_and_instructions/ghz_marl_paper/main.pdf

@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -114,13 +115,29 @@ class MAPPOAgent:
             stats[k] /= max(n_batches, 1)
         return stats
 
+    def _get_checkpoint(self):
+        ckpt = {"actor": self.actor.state_dict()}
+        if self.critic is not None:
+            ckpt["critic"] = self.critic.state_dict()
+        return ckpt
+
+    def _load_checkpoint(self, ckpt):
+        self.actor.load_state_dict(ckpt["actor"])
+        if self.critic is not None and "critic" in ckpt:
+            self.critic.load_state_dict(ckpt["critic"])
+
     def save(self, path):
-        torch.save({
-            "actor": self.actor.state_dict(),
-            "critic": self.critic.state_dict(),
-        }, path)
+        import tempfile
+        import shutil
+        fd, tmp = tempfile.mkstemp(suffix=".pt")
+        os.close(fd)
+        try:
+            torch.save(self._get_checkpoint(), tmp)
+            shutil.move(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def load(self, path):
         ckpt = torch.load(path, map_location=self.device, weights_only=True)
-        self.actor.load_state_dict(ckpt["actor"])
-        self.critic.load_state_dict(ckpt["critic"])
+        self._load_checkpoint(ckpt)
